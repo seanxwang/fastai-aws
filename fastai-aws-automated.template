@@ -1,0 +1,110 @@
+{
+   "AWSTemplateFormatVersion" : "2010-09-09",
+   "Description" : "CloudFormation stack to create fastai instance from AMI with automated Jupyter and idle shutdown",
+
+   "Parameters" : {
+      "InstanceName" : {
+         "Description" : "The name of the instance",
+         "Type" : "String",
+         "MinLength" : "1",
+         "MaxLength" : "28",
+         "AllowedPattern" : "[a-zA-Z0-9-]*",
+         "Default" : "fastai-auto-instance"
+       },
+  	  "KeyPair": {
+  		  "Type":"AWS::EC2::KeyPair::KeyName",
+  		  "Description":"Choose an existing key pair to launch the instance",
+        "Default" : "fastai-key"
+  	  },
+  	  "InstanceType" : {
+  		  "Description" : "Amazon EC2 instance type",
+  		  "Type" : "String",
+  		  "Default" : "t2.small",
+  		  "AllowedValues" : [ "t2.small", "t2.medium", "t2.large", "t2.xlarge", "p2.xlarge" ]
+  	  }
+    },
+
+  	"Mappings":{
+  		"RegionMap" : {
+  			"us-east-1"      : { "64" : "ami-c6ac1cbc"}
+  		}
+  	},
+
+    "Resources" : {
+
+      "fastaiSG" : {
+        "Type" : "AWS::EC2::SecurityGroup",
+        "Properties" : {
+          "GroupDescription" : "FastAI instance security group",
+          "SecurityGroupIngress" : [
+            { "IpProtocol" : "tcp", "FromPort" : "22",  "ToPort" : "22",  "CidrIp" : "0.0.0.0/0" },
+            { "IpProtocol" : "tcp", "FromPort" : "9999",  "ToPort" : "9999",  "CidrIp" : "0.0.0.0/0" }
+          ]
+        }
+      },
+
+      "fastai" : {
+         "Type" : "AWS::EC2::Instance",
+         "Properties" : {
+      			"ImageId" : { "Fn::FindInMap": [ "RegionMap", { "Ref" : "AWS::Region" }, "64"] },
+      			"KeyName" : { "Ref": "KeyPair" },
+      			"InstanceType" : { "Ref" : "InstanceType" },
+            "SecurityGroupIds" : [{ "Ref" : "fastaiSG" }],
+            "Tags": [
+                { "Key" : "Name", "Value" : { "Ref": "InstanceName" } }
+            ],
+            "UserData": { "Fn::Base64" : { "Fn::Join" : ["\n", [
+              "#!/bin/bash",
+              "yum update -y",
+              "sudo -u ubuntu -H sh -c \"jupyter notebook --generate-config\"",
+              "sudo -u ubuntu -H sh -c 'cd /home/ubuntu/.jupyter ; openssl req -x509 -nodes -days 11499 -newkey rsa:1024 -keyout jupyterkey.key -out jupytercert.pem -subj \"/C=US/ST=WA/L=Seattle/O=seanxwang/OU=aws/CN=seanxwang.com\"'",
+              "echo 'c.NotebookApp.open_browser = False' >> /home/ubuntu/.jupyter/jupyter_notebook_config.py",
+              "echo 'c.NotebookApp.port = 9999' >> /home/ubuntu/.jupyter/jupyter_notebook_config.py",
+              "echo \"c.NotebookApp.certfile = u'/home/ubuntu/.jupyter/jupytercert.pem'\" >> /home/ubuntu/.jupyter/jupyter_notebook_config.py",
+              "echo \"c.NotebookApp.keyfile = u'/home/ubuntu/.jupyter/jupyterkey.key'\" >> /home/ubuntu/.jupyter/jupyter_notebook_config.py",
+              "echo 'c.NotebookApp.ip = \"0.0.0.0\"' >> /home/ubuntu/.jupyter/jupyter_notebook_config.py",
+              "echo \"c.NotebookApp.password = u'sha1:f1950b94e7dd:41e13cf1bc403f1095029c42e121c880f894f180'\" >> /home/ubuntu/.jupyter/jupyter_notebook_config.py",
+              "mv /etc/rc.local /etc/rc.local.backup",
+              "echo '#!/bin/sh -e' > /etc/rc.local",
+              "echo 'cd /home/ubuntu' >> /etc/rc.local",
+              "echo \"su ubuntu -c '/home/ubuntu/src/anaconda3/envs/fastai/bin/jupyter-notebook --config=/home/ubuntu/.jupyter/jupyter_notebook_config.py --certfile=/home/ubuntu/.jupyter/jupytercert.pem --keyfile /home/ubuntu/.jupyter/jupyterkey.key &'\" >> /etc/rc.local",
+              "sudo chmod 755 /etc/rc.local",
+              "sudo reboot",
+              ""
+            ]]}}
+        }
+     },
+
+     "CPUAlarm" : {
+       "Type" : "AWS::CloudWatch::Alarm",
+       "Properties" : {
+         "AlarmDescription" : "CPU alarm for fastai instance",
+         "AlarmActions": [{"Fn::Join": ["",["arn:aws:swf:", { "Ref" : "AWS::Region" }, ":", {"Ref" : "AWS::AccountId"} , ":action/actions/AWS_EC2.InstanceId.Stop/1.0" ]]}],
+         "MetricName" : "CPUUtilization",
+         "Namespace" : "AWS/EC2",
+         "Statistic" : "Average",
+         "Period" : "900",
+         "EvaluationPeriods" : "4",
+         "Threshold" : "0.1",
+         "ComparisonOperator" : "LessThanThreshold",
+         "Dimensions" : [ {
+           "Name" : "InstanceId",
+           "Value" : { "Ref" : "fastai" }
+         } ]
+       }
+     }
+
+   },
+
+   "Outputs" : {
+      "fastaiDnsName" : {
+         "Description" : "Access fastai using https://<DnsName>:9999",
+         "Value" : {
+            "Fn::GetAtt" : [
+              "fastai",
+              "PublicDnsName"
+            ]
+         }
+      }
+   }
+}
